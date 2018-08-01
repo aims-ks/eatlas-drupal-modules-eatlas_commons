@@ -1,0 +1,20 @@
+; $Id$
+name = eAtlas commons
+description = Generic methods that are likely to be reused, and CSS that should be applied everywhere on the site on any theme.
+core = 7.x
+
+files[] = eatlas_commons.module
+files[] = test/php/eatlas_commons.test
+
+stylesheets[all][] = css/eatlas_commons.css
+
+package = eAtlas
+
+dependencies[] = field
+dependencies[] = entity
+
+; Attributes used by the update module.
+; There fields needs to be removed if the module is migrated to Drupal.org
+project status url = "http://drupal.eatlas.org.au/modules/eatlas"
+version = "7.x-1.8"
+project = "eatlas_commons"

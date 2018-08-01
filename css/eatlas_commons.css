@@ -1,0 +1,30 @@
+/**
+ * Fix an ugly legacy bug with Fieldset (Mozilla and WebKit)
+ *   The "width" of the element has a odd behaviour.
+ *   See: http://stackoverflow.com/questions/17408815/fieldset-resizes-wrong-appears-to-have-unremovable-min-width-min-content
+ */
+
+/* Mozilla (Firefox, SeaMonkey, etc) */
+@-moz-document url-prefix() {
+	fieldset {
+		display: table-cell;
+	}
+}
+/* WebKit (Chrome, Safari, etc) */
+fieldset {
+	min-width: 0;
+}
+
+.eatlas-commons-hidden-field {
+	display: none;
+}
+
+/* Element has both classes eatlas-commons-hidden-field and eatlas-commons-admin-user */
+.eatlas-commons-hidden-field.eatlas-commons-admin-user {
+	display: block;
+	opacity: 0.2;
+}
+
+.disabled {
+	background-color: #CCCCCC;
+}

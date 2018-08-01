@@ -1,0 +1,82 @@
+<?php
+
+/**
+ * Class EatlasCommonsEncodingTestCase
+ * Run test on the Encoding methods.
+ * NOTE: We need to write a new class for each group of test.
+ */
+
+class EatlasCommonsEncodingTestCase extends DrupalWebTestCase {
+	public static function getInfo() {
+		return array(
+			'name' => 'eAtlas commons - Encoding tests',
+			'description' => 'Test encoding functions available in eAtlas commons module.',
+			'group' => 'eAtlas',
+		);
+	}
+
+	public function setUp() {
+		// We call parent::setUp() with the list of modules we want to enable.
+		// This can be an array or just a list of arguments.
+		parent::setUp('eatlas_commons');
+
+		$this->testResourcesPath = drupal_get_path('module', 'eatlas_commons') . '/test/resources/';
+
+		$this->ascii_content = file_get_contents($this->testResourcesPath . "ascii.csv");
+		$this->utf8_content = file_get_contents($this->testResourcesPath . "utf8.csv");
+		$this->windows_content = file_get_contents($this->testResourcesPath . "windows1252.csv");
+		$this->macintosh_content = file_get_contents($this->testResourcesPath . "macintosh.csv");
+
+		$this->mixed_utf8_windows_content = file_get_contents($this->testResourcesPath . "mixed-utf8-windows1252.csv");
+		$this->mixed_utf8_macintosh_content = file_get_contents($this->testResourcesPath . "mixed-utf8-macintosh.csv");
+	}
+
+	public function testDetectEncoding() {
+		// debug('Print some message in the test output window.');
+		// $this->randomName(10);
+		// $this->assertTrue($booleanVariable, $message);
+		// $this->assertFalse($booleanVariable, $message);
+		$ascii_content_encoding = eatlas_commons_detect_encoding($this->ascii_content);
+		$utf8_content_encoding = eatlas_commons_detect_encoding($this->utf8_content);
+		$windows_content_encoding = eatlas_commons_detect_encoding($this->windows_content);
+		$macintosh_content_encoding = eatlas_commons_detect_encoding($this->macintosh_content);
+
+		$this->assertEqual(EATLAS_COMMONS_ENC_ASCII, $ascii_content_encoding, "Testing ASCII file encoding");
+		$this->assertEqual(EATLAS_COMMONS_ENC_UTF8, $utf8_content_encoding, "Testing UTF-8 file encoding");
+		$this->assertEqual(EATLAS_COMMONS_ENC_WINDOWS_1252, $windows_content_encoding, "Testing Windows-1252 file encoding");
+		$this->assertEqual(EATLAS_COMMONS_ENC_MACINTOSH, $macintosh_content_encoding, "Testing Macintosh file encoding");
+
+
+		$mixed_utf8_windows_content_encoding = eatlas_commons_detect_encoding($this->mixed_utf8_windows_content);
+		$mixed_utf8_macintosh_content_encoding = eatlas_commons_detect_encoding($this->mixed_utf8_macintosh_content);
+
+		$this->assertEqual(EATLAS_COMMONS_ENC_WINDOWS_1252, $mixed_utf8_windows_content_encoding, "Testing mixed UTF-8 and Windows-1252 file encoding");
+		$this->assertEqual(EATLAS_COMMONS_ENC_MACINTOSH, $mixed_utf8_macintosh_content_encoding, "Testing mixed UTF-8 and Macintosh file encoding");
+	}
+
+	public function testFixEncoding() {
+		$ascii_to_utf8_content = eatlas_commons_fix_encoding($this->ascii_content);
+		$utf8_to_utf8_content = eatlas_commons_fix_encoding($this->utf8_content);
+		$windows_to_utf8_content = eatlas_commons_fix_encoding($this->windows_content);
+		$macintosh_to_utf8_content = eatlas_commons_fix_encoding($this->macintosh_content);
+
+		$this->assertEqual($this->ascii_content, $ascii_to_utf8_content, "Ensure converting a valid ASCII file to UTF-8 doesn't modify it");
+		$this->assertEqual($this->utf8_content, $utf8_to_utf8_content, "Ensure converting a valid UTF-8 file to UTF-8 doesn't modify it");
+		$this->assertEqual($this->utf8_content, $windows_to_utf8_content, "Convert Windows-1252 to UTF-8 file");
+		$this->assertEqual($this->utf8_content, $macintosh_to_utf8_content, "Convert Macintosh to UTF-8 file");
+	}
+
+	public function testConvertUTF8ToASCII() {
+		$ascii_to_ascii_content = eatlas_commons_convert_csv_utf8_to_ascii($this->ascii_content);
+		$utf8_to_ascii_content = eatlas_commons_convert_csv_utf8_to_ascii($this->utf8_content);
+
+		// Uncomment to debug what is wrong with the conversion
+		//file_put_contents('/tmp/output.txt', $utf8_to_ascii_content);
+
+		$this->assertEqual($this->ascii_content, $ascii_to_ascii_content, "Ensure converting a valid ASCII CSV file to ASCII doesn't modify it");
+		$this->assertEqual($this->ascii_content, $utf8_to_ascii_content, "Convert UTF-8 to ASCII CSV file");
+	}
+}
+
+?>
+

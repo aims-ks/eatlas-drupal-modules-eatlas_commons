@@ -1,0 +1,1490 @@
+<?php
+
+/**
+ * Implements: hook_menu().
+ *
+ * Define a "eAtlas module" category for eAtlas module under
+ * "/admin/config". This is used by all eAtlas module that have
+ * a configuration interface.
+ *
+ * Module configuration
+ *   https://api.drupal.org/api/drupal/modules%21system%21system.api.php/function/hook_menu/7
+ */
+function eatlas_commons_menu() {
+	$items = array();
+
+	$items['admin/config/eatlas'] = array(
+		'title' => 'eAtlas modules',
+		'description' => 'Settings related to eAtlas modules.',
+		'position' => 'right',
+
+		'page callback' => 'system_admin_menu_block_page',
+		'access arguments' => array('administer site configuration'),
+		'file' => 'system.admin.inc',
+		'file path' => drupal_get_path('module', 'system')
+	);
+
+	return $items;
+}
+
+/**
+ * Implements hook_preprocess_node().
+ *
+ * Add template for display type.
+ * Example:
+ *   node--article--teaser.tpl.php
+ */
+function eatlas_commons_preprocess_node(&$vars) {
+	$vars['theme_hook_suggestions'][] = 'node__' . $vars['type'] . '__' . $vars['view_mode'];
+}
+
+function eatlas_commons_starts_with($haystack, $needle) {
+	return !strncmp($haystack, $needle, strlen($needle));
+}
+
+/**
+ * Copy a field from an existing form (the "image" form) and prepare it
+ * so it can be added to an other form.
+ *
+ * @param array $form
+ *   An array representing the form that the copied element will be attached to.
+ *
+ * @param array $form_state
+ *   An array containing the current state of the form.
+ *
+ * @param string $field_name
+ *   The internal name of the field to copy.
+ *
+ * @param optional object $entity
+ *   The entity object.
+ *
+ * @return
+ *   An array representing the field, as describe by the "Form API".
+ *   The field is ready to be added to a form.
+ *   To add the field to an existing form:
+ *     $form += eatlas_commons_get_image_field($form, $form_state, $field_name);
+ *     OR
+ *     eatlas_commons_form_add_field($form, eatlas_commons_get_image_field($form, $form_state, $field_name));
+ *
+ * Form API reference:
+ *   https://api.drupal.org/api/drupal/developer!topics!forms_api_reference.html/7
+ *
+ * @see https://api.drupal.org/comment/53308#comment-53308
+ */
+function eatlas_commons_get_image_field(&$form, &$form_state, $field_name, $entity = NULL) {
+	// There is not much to say about this method.
+	// It's basically Drupal magic...
+	$empty_field = array();
+
+	// https://api.drupal.org/api/drupal/modules%21field%21field.info.inc/function/field_info_field/7
+	$field_info = field_info_field($field_name);
+	if (!$field_info) return $empty_field;
+
+	// https://api.drupal.org/api/drupal/modules%21field%21field.info.inc/function/field_info_instance/7
+	$field_instance = field_info_instance('file', $field_name, 'image');
+	if (!$field_instance) return $empty_field;
+
+	// https://api.drupal.org/api/drupal/modules!field!field.form.inc/function/field_default_form/7
+	$field = field_default_form('file', $entity, $field_info, $field_instance, LANGUAGE_NONE, array(), $form, $form_state);
+	if (!$field) return $empty_field;
+
+	return $field;
+}
+
+/**
+ * $entity_type = node or file
+ */
+function eatlas_commons_get_entity_value($entity_type, $entity, $field_name) {
+	$node_wrapper = entity_metadata_wrapper($entity_type, $entity);
+	if (!empty($node_wrapper->{$field_name})) {
+		return $node_wrapper->{$field_name}->value();
+	}
+	return NULL;
+}
+
+/**
+ * $entity_type = node or file
+ */
+function eatlas_commons_set_entity_value($entity_type, &$entity, $field_name, $value) {
+	$node_wrapper = entity_metadata_wrapper($entity_type, $entity);
+	if (!empty($node_wrapper->{$field_name})) {
+		$node_wrapper->{$field_name}->set($value);
+	}
+}
+
+/**
+ * Find an entity by title. Since the title is not always unique,
+ * this method also matches "aliases" defined in the field
+ * "field_aliases".
+ *
+ * @param string $entity_alias
+ *   The entity title to look for in the array of entities.
+ *
+ * @param array $entities
+ *   An array of entity objects.
+ *
+ * @return
+ *   The first entity found that match the $entity_alias.
+ *   Returns NULL if no entity were found.
+ *   If an entity title is identical to an other entity alias,
+ *   the method will return the first one foune according to the order
+ *   of the entities in the $entities array.
+ *
+ * Used in: eatlas_exif, eatlas_georss_aggregator
+ */
+function eatlas_commons_get_entity_by_alias($entity_alias, $entities) {
+	if ($entities !== NULL) {
+		foreach ($entities as $entity) {
+			// Find by title
+			if (isset($entity->title) && $entity->title && strcasecmp($entity->title, $entity_alias) === 0) {
+				return $entity;
+			}
+			// If not found, find by aliases
+			if (isset($entity->field_aliases) && $entity->field_aliases && $entity->field_aliases[LANGUAGE_NONE]) {
+				foreach ($entity->field_aliases[LANGUAGE_NONE] as $alias_array) {
+					if ($alias_array && $alias_array['value']) {
+						$alias = $alias_array['value'];
+						if (strcasecmp($alias, $entity_alias) === 0) {
+							return $entity;
+						}
+					}
+				}
+			}
+		}
+	}
+	// If no entities match the provided $entity_alias, return NULL.
+	return NULL;
+}
+
+/**
+ * Add a field to a form, at a given position. This method take care of
+ * offsetting the weight of the fields when needed to limited the
+ * possibility of weight clash.
+ *
+ * @param array $form
+ *   An array representing the form that the element will be attached to.
+ *
+ * @param array $fields
+ *   An associative array of fields. The key is the field name and the
+ *   value is the field array, as describe by the "Form API".
+ *
+ * @param int $weight
+ *   The weight of the field, in the form. Use the keyword 'LAST' to put
+ *   the field at the end of the form, before the 'submit' button.
+ *   NOTE: The $weight works better when the method is called after the form
+ *     as been build. To ensure this, set the module weight to something
+ *     greater than 0:
+ *       db_query("UPDATE {system} SET weight = 10 WHERE type = 'module' AND name = 'MODULE_NAME'");
+ *   @see: https://www.drupal.org/node/110238
+ *
+ * Form API reference:
+ *   https://api.drupal.org/api/drupal/developer!topics!forms_api_reference.html/7
+ */
+function eatlas_commons_form_add_field(&$form, $fields, $weight = 'LAST') {
+	if ($form !== NULL && !empty($fields)) {
+		// Fix form element weight
+		eatlas_commons_fix_form_weights($form);
+
+		// Get the name if all fields in the form, ordered.
+		// https://api.drupal.org/api/drupal/includes%21common.inc/function/element_children/7
+		$elements = element_children($form, TRUE);
+
+
+
+		// Find the $first_weight; the weight of the first element from the $fields list.
+		// $weight = 'LAST' (or is not an integer) => Find the weight of the last element in the form
+		// Otherwise, use the value of $weight directly.
+		$first_weight = $weight;
+		$submit_weight = $form['submit']['#weight'];
+		if (!is_int($weight)) {
+			$first_weight = -100;
+			foreach($elements as $element) {
+				if (isset($form[$element]['#weight']) && $form[$element]['#weight'] > $first_weight && $form[$element]['#weight'] < $submit_weight) {
+					$first_weight = $form[$element]['#weight'];
+				}
+			}
+			$first_weight++;
+		}
+
+		// Find the $last_weight; the weight of the last element from
+		// the new $fields list.
+		// Also set the weight for all the new fields.
+		$last_weight = $first_weight;
+		foreach($fields as $field_name => &$field_array) {
+			$field_array['#weight'] = $last_weight;
+			$last_weight++;
+		}
+
+		// Offset the weight of the fields in the form,
+		// to make room for the new fields.
+		foreach($elements as $element) {
+			if (isset($form[$element]['#weight']) && $form[$element]['#weight'] >= $first_weight) {
+				$form[$element]['#weight'] += ($last_weight - $first_weight);
+			}
+		}
+
+		// NOTE: After this operation, some weights might clash with
+		//   weight within fieldset. It's not a big deal since the
+		//   fieldset are independent from the form.
+
+
+
+		// Add the new fields to the form. The order as no importance,
+		// the weight do all the job.
+		$form += $fields;
+		unset($form['#sorted']);
+	}
+}
+
+/**
+ * Fix all fields order by setting a unique weight to all fields.
+ * Weight goes from 0 to n
+ *   n: The number of fields, counting fields within fieldsets.
+ *     Each fieldset are also counted as a field.
+ * NOTE: Recursively travels through fieldsets (field groups).
+ *
+ * Example:
+ *   form {
+ *     "title" => { "#weight" => 0, ... },
+ *     "body" => { "#weight" => 1, ... },
+ *     "fieldset" => { "#weight" => 2
+ *       "author" => { "#weight" => 3, ... },
+ *       "reviewer" => { "#weight" => 4, ... }
+ *     },
+ *     "tags" => { "#weight" => 5, ... },
+ *     ...
+ *     "submit" => { "#weight" => n, ... }
+ *   }
+ *
+ * @param array $container
+ *   An array representing the fields container. It's usualy the form.
+ *
+ * @param int $field_weight
+ *   The weight of the first field. Default to 0.
+ *
+ * @return
+ *   The weight of the last field +1.
+ *   If $field_weight has its default value of 0, it returns the
+ *   number of fields in the form, counting fieldsets.
+ */
+function eatlas_commons_fix_form_weights(&$container, $field_weight = 0) {
+	// Get the name if all fields in the container, ordered.
+	// https://api.drupal.org/api/drupal/includes%21common.inc/function/element_children/7
+	$elements = element_children($container, TRUE);
+
+	foreach($elements as $id => $element) {
+		$container[$element]['#weight'] = $field_weight;
+		$field_weight++;
+		if (isset($container[$element]['#type']) && $container[$element]['#type'] === 'fieldset') {
+			$field_weight = eatlas_commons_fix_form_weights($container[$element], $field_weight);
+		}
+	}
+
+	return $field_weight;
+}
+
+
+
+/**
+ * Return the form operation:
+ * - 'create': New node/file
+ * - 'update': Editing an old node/file
+ * - 'unknown': Not a node/file form
+ * This method return the same strings as hook_node_access (trying to follow the standards).
+ *     https://api.drupal.org/api/drupal/modules%21node%21node.api.php/function/hook_node_access/7
+ */
+function eatlas_commons_get_form_operation(&$form) {
+	if (array_key_exists('#node', $form)) {
+		// Node form
+		$node = $form['#node'];
+		if (!isset($node->nid) || isset($node->is_new)) {
+			return 'create';
+		}
+		return 'update';
+
+	} elseif (array_key_exists('#entity', $form)) {
+		// File form
+		$file = $form['#entity'];
+		if (isset($file->fid)) {
+			return 'update';
+		}
+		return 'create';
+	}
+
+	// Something else (like the contact form)
+	return 'unknown';
+}
+
+/**
+ * Different "form field type" has different way to store the value in
+ * the form. This method set the value for all the field type tested so
+ * far.
+ *
+ * NOTE: There is no documentation on how each field type store their
+ *     default value, so each of them has required a lot of research.
+ */
+function eatlas_commons_set_form_default_value(&$form, $field_name, $value) {
+	eatlas_commons_set_form_default_values($form, $field_name, array($value));
+}
+function eatlas_commons_set_form_default_values(&$form, $field_name, $values) {
+	$field_info = field_info_field($field_name);
+	$field_type = $field_info['type'];
+
+	$values = is_array($values) ? $values : array($values);
+
+	// NOTE: form_set_value can not be used to set the default value.
+	//     https://api.drupal.org/api/drupal/includes!form.inc/function/form_set_value/7
+	switch($field_type) {
+		case 'number_integer':
+		case 'text':
+		case 'text_long':
+			for ($i=0; $i<count($values); $i++) {
+				$form[$field_name][LANGUAGE_NONE][$i]['value']['#default_value'] = $values[$i];
+			}
+			break;
+		case 'taxonomy_term_reference':
+			for ($i=0; $i<count($values); $i++) {
+				$form[$field_name][LANGUAGE_NONE]['#default_value'][$i] = $values[$i];
+			}
+			break;
+		case 'node_reference':
+			for ($i=0; $i<count($values); $i++) {
+				$value = $values[$i];
+				if (is_object($value)) {
+					if (property_exists($value, 'nid')) {
+						$value = $value->nid;
+					}
+				}
+				$form[$field_name][LANGUAGE_NONE]['#default_value'][$i] = $value;
+			}
+			break;
+		case 'text_with_summary':
+			for ($i=0; $i<count($values); $i++) {
+				if (isset($values[$i]['value'])) {
+					$form[$field_name][LANGUAGE_NONE][$i]['#default_value'] = $values[$i]['value'];
+				}
+				if (isset($values[$i]['summary'])) {
+					$form[$field_name][LANGUAGE_NONE][$i]['summary']['#default_value'] = $values[$i]['summary'];
+				}
+				if (isset($values[$i]['format'])) {
+					$form[$field_name][LANGUAGE_NONE][$i]['#format'] = $values[$i]['format'];
+				}
+			}
+			break;
+		case 'file':
+			for ($i=0; $i<count($values); $i++) {
+				$form[$field_name][LANGUAGE_NONE][$i]['#default_value']['fid'] = $values[$i];
+			}
+			break;
+		case '':
+			// Direct attributes (such as title) do not have a field type
+			$form[$field_name]['#default_value'] = $values[0];
+			break;
+		default:
+			drupal_set_message("The field type '$field_type' (required for the field '$field_name') ".
+					"is not yet supported by 'eatlas_commons_set_form_default_value'", 'warning');
+			break;
+	}
+}
+function eatlas_commons_get_form_default_values(&$form, $field_name) {
+	$field_info = field_info_field($field_name);
+	$field_type = $field_info['type'];
+
+	$default_values = array();
+
+	// NOTE: form_set_value can not be used to set the default value.
+	//     https://api.drupal.org/api/drupal/includes!form.inc/function/form_set_value/7
+	switch($field_type) {
+		case 'number_integer':
+		case 'text':
+		case 'text_long':
+			for ($i=0; $i<count($form[$field_name][LANGUAGE_NONE]); $i++) {
+				$default_values[] = $form[$field_name][LANGUAGE_NONE][$i]['value']['#default_value'];
+			}
+			break;
+		case 'taxonomy_term_reference':
+		case 'node_reference':
+			$default_values = $form[$field_name][LANGUAGE_NONE]['#default_value'];
+			break;
+		case 'text_with_summary':
+			for ($i=0; $i<count($form[$field_name][LANGUAGE_NONE]); $i++) {
+				$default_value = array();
+				if (isset($form[$field_name][LANGUAGE_NONE][$i]['#default_value'])) {
+					$default_value['value'] = $form[$field_name][LANGUAGE_NONE][$i]['#default_value'];
+				}
+				if (isset($form[$field_name][LANGUAGE_NONE][$i]['summary']['#default_value'])) {
+					$default_value['summary'] = $form[$field_name][LANGUAGE_NONE][$i]['summary']['#default_value'];
+				}
+				if (isset($form[$field_name][LANGUAGE_NONE][$i]['#format'])) {
+					$default_value['format'] = $form[$field_name][LANGUAGE_NONE][$i]['#format'];
+				}
+				if (!empty($default_value)) {
+					$default_values[] = $default_value;
+				}
+			}
+			break;
+		case 'file':
+			for ($i=0; $i<count($form[$field_name][LANGUAGE_NONE]); $i++) {
+				$default_values[] = $form[$field_name][LANGUAGE_NONE][$i]['#default_value']['fid'];
+			}
+			break;
+		case '':
+			// Direct attributes (such as title) do not have a field type
+			$default_values[] = $form[$field_name]['#default_value'];
+			break;
+		default:
+			drupal_set_message("The field type '$field_type' (required for the field '$field_name') ".
+					"is not yet supported by 'eatlas_commons_get_form_default_value'", 'warning');
+			break;
+	}
+
+	return $default_values;
+}
+
+function eatlas_commons_get_form_field_values(&$form_state, $field_name) {
+	$field_info = field_info_field($field_name);
+	$field_type = $field_info['type'];
+
+	$values = array();
+	switch($field_type) {
+		case 'number_integer':
+		case 'list_text':
+		case 'text':
+		case 'text_long':
+			if (isset($form_state['values'][$field_name][LANGUAGE_NONE])) {
+				foreach($form_state['values'][$field_name][LANGUAGE_NONE] as $value) {
+					if (isset($value['value']) && !empty($value['value'])) {
+						$values[] = $value['value'];
+					}
+				}
+			} else {
+				$values = NULL;
+			}
+			break;
+		case 'file': // UNTESTED
+			if (isset($form_state['values'][$field_name][LANGUAGE_NONE])) {
+				foreach($form_state['values'][$field_name][LANGUAGE_NONE] as $value) {
+					if (isset($value['fid']) && !empty($value['fid'])) {
+						$values[] = $value['fid'];
+					}
+				}
+			} else {
+				$values = NULL;
+			}
+			break;
+		case 'taxonomy_term_reference':
+			if (isset($form_state['values'][$field_name][LANGUAGE_NONE])) {
+				foreach($form_state['values'][$field_name][LANGUAGE_NONE] as $value) {
+					if (isset($value['tid']) && !empty($value['tid'])) {
+						$values[] = $value['tid'];
+					}
+				}
+			} else {
+				$values = NULL;
+			}
+			break;
+		case 'node_reference':
+			if (isset($form_state['values'][$field_name][LANGUAGE_NONE])) {
+				foreach($form_state['values'][$field_name][LANGUAGE_NONE] as $value) {
+					if (isset($value['nid']) && !empty($value['nid'])) {
+						$values[] = $value['nid'];
+					}
+				}
+			} else {
+				$values = NULL;
+			}
+			break;
+		default:
+			drupal_set_message("The field type '$field_type' (required for the field '$field_name') ".
+					"is not yet supported by 'eatlas_commons_get_form_field_values'", 'warning');
+			$values = NULL;
+			break;
+	}
+
+	return $values;
+}
+
+/**
+ * Set the value in a form, after validation.
+ * Drupal take care of the sanitization.
+ * form_set_value is not sufficient (that function is incomplete)
+ * See: https://www.drupal.org/node/1377784
+ */
+function eatlas_commons_set_form_field_value(&$form, &$form_state, $field_name, $value) {
+	$field_info = field_info_field($field_name);
+	$field_type = $field_info['type'];
+
+	switch($field_type) {
+		case 'number_integer':
+		case 'text_long':
+			// Set the value in the part of the form state that is used to display entered
+			// values in the form ('complete form'), in case the form do not submit (contains error).
+			$form_state['complete form'][$field_name][LANGUAGE_NONE][0]['value']['#value'] = $value;
+			$form_state['input'][$field_name][LANGUAGE_NONE] = $value;
+
+			// Set the value in the part of the form state that will be saved in the node ('values').
+			form_set_value($form[$field_name], array(LANGUAGE_NONE => array(0 => array('value' => $value))), $form_state);
+
+			break;
+
+		// Radio button / Checkboxes?
+		case 'list_text':
+			// Set the radio button value. That one is even harder.
+			// 1. Get the radio buttons 'keys'. They are in the attribute '#options'
+			// 2. Loop through all the 'keys', get the associated radio button and set it's value.
+			// NOTE: There is no 'delta' here. Multiple radio button are 'checkboxes'. 
+			foreach($form_state['complete form'][$field_name][LANGUAGE_NONE]['#options'] as $key => $label) {
+				$form_state['complete form'][$field_name][LANGUAGE_NONE][$key]['#value'] = $value;
+			}
+			$form_state['complete form'][$field_name][LANGUAGE_NONE]['#value'] = $value;
+			$form_state['input'][$field_name][LANGUAGE_NONE] = $value;
+
+			// Set the value in the part of the form state that will be saved in the node ('values').
+			form_set_value($form[$field_name], array(LANGUAGE_NONE => array(0 => array('value' => $value))), $form_state);
+
+			break;
+
+		default:
+			drupal_set_message("The field type '$field_type' (required for the field '$field_name') ".
+					"is not yet supported by 'eatlas_commons_set_form_field_value'", 'warning');
+			break;
+	}
+}
+
+/**
+ * Duplicate a node and return the new node.
+ * See: http://drupal.stackexchange.com/questions/6726/how-to-programmatically-duplicate-a-node
+ * Inspired on: https://www.drupal.org/project/node_clone
+ */
+function eatlas_commons_duplicate_node($original_node) {
+	// IMPORTANT: Cloning the node create a new version independent
+	//     from the version present in the cache. Skipping this step
+	//     would result in side effects on other variables using that
+	//     node, and also future variables trying to load that node
+	//     within the same request.
+	$node = clone $original_node;
+
+	// Unset the node ID, which will make the node appear as new.
+	// A new ID will be assign as soon as the new node is saved.
+	unset($node->nid);
+	// Versions
+	unset($node->vid);
+	// Translation node (TODO find out if we need to clone those as well)
+	unset($node->tnid);
+
+	// The "log" field seems to be used to keep a reference to the last
+	// error related to that node, but it's not clear.
+	// New node do not have that field set.
+	unset($node->log);
+
+	// Also handle modules that attach a UUID to the node.
+	// We are not using any that module, but it's better to stay safe.
+	//     https://www.drupal.org/project/uuid
+	unset($node->uuid);
+	unset($node->vuuid);
+
+	return $node;
+}
+
+/**
+ * Hide a field in a form.
+ * This is used with fields that should not be modified because it would
+ * have dangerous implications. The field is still present in the HTML,
+ * but it's hidden using CSS, so the form still behave the same way.
+ * Someone who really want to break the system could use a tool like
+ * firebug or protocol inspector to change the CSS and make it visible.
+ * This feature only prevent accidental modifications.
+ * NOTE: The admin user will still see the field and be able to modify
+ *     it's value, but it will be greyed out to indicate that it should
+ *     not be touched in normal circumstances.
+ */
+function eatlas_commons_hide_form_field(&$form, $field_name) {
+	$form[$field_name]['#attributes']['class'][] = 'eatlas-commons-hidden-field';
+	// I would like to put "if (is_admin())" here but there is no such method
+	// in Drupal API. Even user_access use the user ID to find if the user is
+	// the Admin user: "if ($account->uid == 1)".
+	// See: https://api.drupal.org/api/drupal/modules!user!user.module/function/user_access
+	if (user_access('administer site configuration')) {
+		$form[$field_name]['#attributes']['class'][] = 'eatlas-commons-admin-user';
+	}
+}
+
+function eatlas_commons_hide_form_field_if_not_empty(&$form, $form_state, $field_name) {
+	$values = eatlas_commons_get_form_field_values($form_state, $field_name);
+	if (!empty($values)) {
+		eatlas_commons_hide_form_field($form, $field_name);
+	} else {
+		$default_values = eatlas_commons_get_form_default_values($form, $field_name);
+		if (!empty($default_values)) {
+			eatlas_commons_hide_form_field($form, $field_name);
+		}
+	}
+}
+
+/**
+ * Disable a Drupal field
+ * Works with multiple value forms, but has some issues keeping the values
+ * when a new value is added.
+ *
+ * IMPORTANT: DO NOT use the attribute "disable". The values of disabled
+ *     fields are NOT submitted.
+ */
+function eatlas_commons_disable_form_field(&$form, $form_state, $field_name) {
+	$field_info = field_info_field($field_name);
+	$field_type = $field_info['type'];
+
+	$input_fields = &$form[$field_name][LANGUAGE_NONE];
+	// -1 (FIELD_CARDINALITY_UNLIMITED) = Infinity
+	// 1-n = n values allowed
+	$cardinality = isset($input_fields['#cardinality']) ? $input_fields['#cardinality'] : 1;
+	switch($field_type) {
+		case 'number_integer':
+		case 'text_long':
+			if (isset($input_fields['#max_delta'])) {
+				// Text field
+				for($i=0; $i<=$input_fields['#max_delta']; $i++) {
+					if (isset($input_fields[$i]['value']) && is_array($input_fields[$i]['value'])) {
+						// DO NOT USE "disable"
+						// $input_fields[$i]['value']['#attributes']['disabled'] = 'disabled';
+						$input_fields[$i]['value']['#attributes']['readonly'] = 'readonly';
+
+						// Remove empty fields if multiple values are allowed (we don't want to see an empty box at the end of filled ones)
+						//     https://api.drupal.org/api/drupal/modules!field!field.module/constant/FIELD_CARDINALITY_UNLIMITED/7
+						if ($cardinality == FIELD_CARDINALITY_UNLIMITED || $cardinality > 1) {
+							if (!isset($input_fields[$i]['value']['#default_value']) || empty($input_fields[$i]['value']['#default_value'])) {
+								unset($input_fields[$i]);
+							}
+						}
+					}
+
+					// Hide the 'Add more' button
+					if (isset($input_fields['add_more'])) {
+						$input_fields['add_more']['#attributes']['class'][] = 'eatlas-commons-hidden-field';
+					}
+				}
+			}
+			break;
+
+		// Radio button / Checkboxes?
+		case 'list_text':
+			if (isset($input_fields['#options'])) {
+				// Radio buttons
+				$current_values = eatlas_commons_get_form_field_values($form_state, $field_name);
+				if (!empty($current_values)) {
+					$current_value = $current_values[0];
+					foreach($input_fields['#options'] as $key => $label) {
+						// Only disable the ones that are not checked
+						//     (radio buttons can not be unchecked if there
+						//     is only one valid option)
+						//     http://stackoverflow.com/questions/1953017/why-cant-radio-buttons-be-readonly
+						// NOTE: $key is not always a String. Putting it within "" cast it into String.
+						if ("$key" !== $current_value) {
+							$input_fields[$key]['#attributes']['disabled'] = 'disabled';
+						}
+					}
+				}
+			}
+			break;
+
+		default:
+			drupal_set_message("The field type '$field_type' (required for the field '$field_name') ".
+					"is not yet supported by 'eatlas_commons_disable_form_field'", 'warning');
+			break;
+	}
+}
+
+
+/**
+ * Encoding functions
+ *
+ * NOTE about UTF-8:
+ *   ASCII characters are valid within UTF-8:
+ *   - [00 - 7F]: 0xxxxxxx (1 byte)
+ *   Char between C0 and F7 indicate the beginning of a multi-bytes UTF-8 char.
+ *   - [C0 - DF]: 110xxxxx (2 bytes)
+ *   - [E0 - EF]: 1110xxxx (3 bytes)
+ *   - [F0 - F7]: 11110xxx (4 bytes)
+ *   Subsequent bytes found after a multi-bytes indicator needs to be in the following range:
+ *   - [80 - BF]: 10xxxxxx
+ *   The following bytes are invalid:
+ *   - [80 - BF]: 10xxxxxx, if NOT preceded by a multi-bytes indicator specified above.
+ *   - [C0 - FF]: 11xxxxxx, if preceded by a multi-bytes indicator specified above.
+ *   - [F8 - FF]: 11111xxx, at any time.
+ * https://en.wikipedia.org/wiki/UTF-8#Description
+ */
+
+// https://en.wikipedia.org/wiki/ASCII
+define('EATLAS_COMMONS_ENC_ASCII', 'ASCII');
+
+// https://en.wikipedia.org/wiki/UTF-8
+define('EATLAS_COMMONS_ENC_UTF8', 'UTF-8');
+
+// https://en.wikipedia.org/wiki/Windows-1252
+define('EATLAS_COMMONS_ENC_WINDOWS_1252', 'windows-1252');
+
+// https://en.wikipedia.org/wiki/Mac_OS_Roman
+define('EATLAS_COMMONS_ENC_MACINTOSH', 'macintosh');
+
+/**
+ * Try to determine the encoding of a String by looking at the extended bytes (>=128).
+ * If there is no extended character, the file is ASCII.
+ * If all extended bytes are valid UTF-8 characters, the file is considered UTF-8.
+ * Otherwise, it's considered either Windows-1252 or Macintosh depending on the occurrences of most commonly used
+ *   extended characters (smart quotes, long hyphens, etc).
+ * @param $string string The string to analyse.
+ * @return string EATLAS_COMMONS_ENC_ASCII, EATLAS_COMMONS_ENC_UTF8, EATLAS_COMMONS_ENC_WINDOWS_1252 or EATLAS_COMMONS_ENC_MACINTOSH.
+ */
+function eatlas_commons_detect_encoding($string) {
+	$utf8_char_count = 0;
+	$extended_chars = array();
+
+	if (!empty($string)) {
+		$len = strlen($string);
+		for ($i = 0; $i < $len; $i++) {
+			$char = $string{$i};
+
+			// Check if its a multi-bytes UTF-8 char
+			if ($char >= "\xc0") {
+				$char2 = $i + 1 >= $len ? "\x00" : $string{$i+1};
+				$char3 = $i + 2 >= $len ? "\x00" : $string{$i+2};
+				$char4 = $i + 3 >= $len ? "\x00" : $string{$i+3};
+				if ($char >= "\xc0" & $char <= "\xdf") { // looks like 2 bytes UTF-8
+					if ($char2 >= "\x80" && $char2 <= "\xbf") { // yeah, almost sure it's UTF-8
+						$utf8_char_count++;
+						$i++;
+						continue;
+					}
+				} elseif ($char >= "\xe0" & $char <= "\xef") { // looks like 3 bytes UTF-8
+					if ($char2 >= "\x80" && $char2 <= "\xbf" &&
+							$char3 >= "\x80" && $char3 <= "\xbf") { // yeah, almost sure it's UTF-8
+						$utf8_char_count++;
+						$i = $i + 2;
+						continue;
+					}
+				} elseif ($char >= "\xf0" & $char <= "\xf7") { // looks like 4 bytes UTF-8
+					if($char2 >= "\x80" && $char2 <= "\xbf" &&
+							$char3 >= "\x80" && $char3 <= "\xbf" &&
+							$char4 >= "\x80" && $char4 <= "\xbf") { // yeah, almost sure it's UTF-8
+						$utf8_char_count++;
+						$i = $i + 3;
+						continue;
+					}
+				}
+			}
+
+			// Check if it's an extended char
+			// if (ord($char) >= 128)
+			if ($char >= "\x80") {
+				$extended_chars[$char] = isset($extended_chars[$char]) ? $extended_chars[$char] + 1 : 1;
+			}
+		}
+
+		if (!empty($extended_chars)) {
+			// It's either Windows or Mac.
+
+			// The Windows encoding has unused character.
+			// If any of those char is used, it's definitely not Windows encoding.
+			if (isset($extended_chars[chr(129)]) ||
+					isset($extended_chars[chr(141)]) ||
+					isset($extended_chars[chr(143)]) ||
+					isset($extended_chars[chr(144)]) ||
+					isset($extended_chars[chr(157)])) {
+				return EATLAS_COMMONS_ENC_MACINTOSH;
+			}
+
+			// Count the number of the most common extended character on both encodings.
+			// The one with the higher count win.
+
+			$windows_score = 0;
+			// Single quotes (smart-quotes)
+			if (isset($extended_chars[chr(145)])) { $windows_score += $extended_chars[chr(145)]; }
+			if (isset($extended_chars[chr(146)])) { $windows_score += $extended_chars[chr(146)]; }
+			// Double quotes (smart-quotes)
+			if (isset($extended_chars[chr(147)])) { $windows_score += $extended_chars[chr(147)]; }
+			if (isset($extended_chars[chr(148)])) { $windows_score += $extended_chars[chr(148)]; }
+			// Long hyphen (dash)
+			if (isset($extended_chars[chr(150)])) { $windows_score += $extended_chars[chr(150)]; }
+			if (isset($extended_chars[chr(151)])) { $windows_score += $extended_chars[chr(151)]; }
+
+			$macintosh_score = 0;
+			// Single quotes (smart-quotes)
+			if (isset($extended_chars[chr(212)])) { $macintosh_score += $extended_chars[chr(212)]; }
+			if (isset($extended_chars[chr(213)])) { $macintosh_score += $extended_chars[chr(213)]; }
+			// Double quotes (smart-quotes)
+			if (isset($extended_chars[chr(210)])) { $macintosh_score += $extended_chars[chr(210)]; }
+			if (isset($extended_chars[chr(211)])) { $macintosh_score += $extended_chars[chr(211)]; }
+			// Long hyphen (dash)
+			if (isset($extended_chars[chr(208)])) { $macintosh_score += $extended_chars[chr(208)]; }
+			if (isset($extended_chars[chr(209)])) { $macintosh_score += $extended_chars[chr(209)]; }
+
+			if ($windows_score !== $macintosh_score) {
+				return $windows_score > $macintosh_score ? EATLAS_COMMONS_ENC_WINDOWS_1252 : EATLAS_COMMONS_ENC_MACINTOSH;
+			}
+
+			// They have the same score. We need to look at other characters
+
+			// Degree
+			if (isset($extended_chars[chr(176)])) { $windows_score += $extended_chars[chr(176)]; } // Proper symbol
+			if (isset($extended_chars[chr(186)])) { $windows_score += $extended_chars[chr(186)]; } // Often miss-use
+			// Bullet (for bullet list)
+			if (isset($extended_chars[chr(149)])) { $windows_score += $extended_chars[chr(149)]; }
+			// Ellipsis
+			if (isset($extended_chars[chr(133)])) { $windows_score += $extended_chars[chr(133)]; }
+
+			// Degree
+			if (isset($extended_chars[chr(161)])) { $macintosh_score += $extended_chars[chr(161)]; } // Proper symbol
+			if (isset($extended_chars[chr(188)])) { $macintosh_score += $extended_chars[chr(188)]; } // Often miss-use
+			// Bullet (for bullet list)
+			if (isset($extended_chars[chr(165)])) { $macintosh_score += $extended_chars[chr(165)]; }
+			// Ellipsis
+			if (isset($extended_chars[chr(201)])) { $macintosh_score += $extended_chars[chr(201)]; }
+
+			if ($windows_score !== $macintosh_score) {
+				return $windows_score > $macintosh_score ? EATLAS_COMMONS_ENC_WINDOWS_1252 : EATLAS_COMMONS_ENC_MACINTOSH;
+			}
+
+			// They still have the same score. Look at some more characters
+
+			// Double quotes (french style smart-quotes)
+			if (isset($extended_chars[chr(171)])) { $windows_score += $extended_chars[chr(171)]; }
+			if (isset($extended_chars[chr(187)])) { $windows_score += $extended_chars[chr(187)]; }
+
+			// Double quotes (french style smart-quotes)
+			if (isset($extended_chars[chr(199)])) { $macintosh_score += $extended_chars[chr(199)]; }
+			if (isset($extended_chars[chr(200)])) { $macintosh_score += $extended_chars[chr(200)]; }
+
+			if ($windows_score !== $macintosh_score) {
+				return $windows_score > $macintosh_score ? EATLAS_COMMONS_ENC_WINDOWS_1252 : EATLAS_COMMONS_ENC_MACINTOSH;
+			}
+
+			// This string is too ambiguous to tell if it's either Mac or Windows.
+			// Lets assume it's Windows (higher probability)
+			return EATLAS_COMMONS_ENC_WINDOWS_1252;
+
+		} elseif ($utf8_char_count > 0) {
+			// Only return UTF-8 when all non-ASCII characters are valid UTF-8 characters.
+			return EATLAS_COMMONS_ENC_UTF8;
+		}
+	}
+
+	// No UTF-8 char, no
+	return EATLAS_COMMONS_ENC_ASCII;
+}
+
+/**
+ * Fix encoding issues in a String.
+ * Can convert Windows-1252 or Macintosh encoding to UTF-8.
+ * Inspired from:
+ *   https://github.com/neitanod/forceutf8/blob/master/src/ForceUTF8/Encoding.php
+ * @param $string string String to convert.
+ * @param null $input_encoding string Can be EATLAS_COMMONS_ENC_ASCII, EATLAS_COMMONS_ENC_UTF8, EATLAS_COMMONS_ENC_WINDOWS_1252 or EATLAS_COMMONS_ENC_MACINTOSH.
+ *   Doesn't support mixed encoding. Default NULL to use auto-detection using "eatlas_commons_detect_encoding".
+ * @return string Converted string in UTF-8.
+ */
+function eatlas_commons_convert_to_utf8($string, $input_encoding = NULL) {
+	if (empty($string)) {
+		return $string;
+	}
+
+	if (empty($input_encoding)) {
+		$input_encoding = eatlas_commons_detect_encoding($string);
+	}
+
+	// If encoding is ASCII, we have nothing to convert.
+	if ($input_encoding === EATLAS_COMMONS_ENC_ASCII || $input_encoding === EATLAS_COMMONS_ENC_UTF8) {
+		return $string;
+	}
+
+	$extended_chars_conv_table = NULL;
+	if ($input_encoding === EATLAS_COMMONS_ENC_WINDOWS_1252) {
+		// Windows-1252 to UTF-8
+		$extended_chars_conv_table = array(
+			128 => "\xe2\x82\xac", // Euro
+			129 => "", // UNUSED
+
+			130 => "\xe2\x80\x9a", // Coma
+			131 => "\xc6\x92", // Curved "f"
+			132 => "\xe2\x80\x9e", // Double coma
+			133 => "\xe2\x80\xa6", // Ellipsis
+			134 => "\xe2\x80\xa0", // Dagger
+			135 => "\xe2\x80\xa1", // Double-dagger
+			136 => "\xcb\x86", // Circumflex
+			137 => "\xe2\x80\xb0", // Per mille
+			138 => "\xc5\xa0", // Upside-down circumflex S
+			139 => "\xe2\x80\xb9", // Left quotation mark (<)
+
+			140 => "\xc5\x92", // OE
+			141 => "", // UNUSED
+			142 => "\xc5\xbd", // Upside-down circumflex Z
+			143 => "", // UNUSED
+			144 => "", // UNUSED
+			145 => "\xe2\x80\x98", // Left quotation mark (')
+			146 => "\xe2\x80\x99", // Right quotation mark (')
+			147 => "\xe2\x80\x9c", // Left quotation mark (")
+			148 => "\xe2\x80\x9d", // Right quotation mark (")
+			149 => "\xe2\x80\xa2", // Bullet (for bullet list)
+
+			150 => "\xe2\x80\x93",
+			151 => "\xe2\x80\x94",
+			152 => "\xcb\x9c",
+			153 => "\xe2\x84\xa2",
+			154 => "\xc5\xa1",
+			155 => "\xe2\x80\xba",
+			156 => "\xc5\x93",
+			157 => "", // UNUSED
+			158 => "\xc5\xbe",
+			159 => "\xc5\xb8",
+
+			160 => "\xc2\xa0", // NBSP
+			161 => "\xc2\xa1",
+			162 => "\xc2\xa2",
+			163 => "\xc2\xa3",
+			164 => "\xc2\xa4",
+			165 => "\xc2\xa5",
+			166 => "\xc2\xa6",
+			167 => "\xc2\xa7",
+			168 => "\xc2\xa8",
+			169 => "\xc2\xa9",
+
+			170 => "\xc2\xaa",
+			171 => "\xc2\xab",
+			172 => "\xc2\xac",
+			173 => "\xc2\xad",
+			174 => "\xc2\xae",
+			175 => "\xc2\xaf",
+			176 => "\xc2\xb0",
+			177 => "\xc2\xb1",
+			178 => "\xc2\xb2",
+			179 => "\xc2\xb3",
+
+			180 => "\xc2\xb4",
+			181 => "\xc2\xb5",
+			182 => "\xc2\xb6",
+			183 => "\xc2\xb7",
+			184 => "\xc2\xb8",
+			185 => "\xc2\xb9",
+			186 => "\xc2\xba",
+			187 => "\xc2\xbb",
+			188 => "\xc2\xbc",
+			189 => "\xc2\xbd",
+
+			190 => "\xc2\xbe",
+			191 => "\xc2\xbf",
+			192 => "\xc3\x80",
+			193 => "\xc3\x81",
+			194 => "\xc3\x82",
+			195 => "\xc3\x83",
+			196 => "\xc3\x84",
+			197 => "\xc3\x85",
+			198 => "\xc3\x86",
+			199 => "\xc3\x87",
+
+			200 => "\xc3\x88",
+			201 => "\xc3\x89",
+			202 => "\xc3\x8a",
+			203 => "\xc3\x8b",
+			204 => "\xc3\x8c",
+			205 => "\xc3\x8d",
+			206 => "\xc3\x8e",
+			207 => "\xc3\x8f",
+			208 => "\xc3\x90",
+			209 => "\xc3\x91",
+
+			210 => "\xc3\x92",
+			211 => "\xc3\x93",
+			212 => "\xc3\x94",
+			213 => "\xc3\x95",
+			214 => "\xc3\x96",
+			215 => "\xc3\x97",
+			216 => "\xc3\x98",
+			217 => "\xc3\x99",
+			218 => "\xc3\x9a",
+			219 => "\xc3\x9b",
+
+			220 => "\xc3\x9c",
+			221 => "\xc3\x9d",
+			222 => "\xc3\x9e",
+			223 => "\xc3\x9f",
+			224 => "\xc3\xa0",
+			225 => "\xc3\xa1",
+			226 => "\xc3\xa2",
+			227 => "\xc3\xa3",
+			228 => "\xc3\xa4",
+			229 => "\xc3\xa5",
+
+			230 => "\xc3\xa6",
+			231 => "\xc3\xa7",
+			232 => "\xc3\xa8",
+			233 => "\xc3\xa9",
+			234 => "\xc3\xaa",
+			235 => "\xc3\xab",
+			236 => "\xc3\xac",
+			237 => "\xc3\xad",
+			238 => "\xc3\xae",
+			239 => "\xc3\xaf",
+
+			240 => "\xc3\xb0",
+			241 => "\xc3\xb1",
+			242 => "\xc3\xb2",
+			243 => "\xc3\xb3",
+			244 => "\xc3\xb4",
+			245 => "\xc3\xb5",
+			246 => "\xc3\xb6",
+			247 => "\xc3\xb7",
+			248 => "\xc3\xb8",
+			249 => "\xc3\xb9",
+
+			250 => "\xc3\xba",
+			251 => "\xc3\xbb",
+			252 => "\xc3\xbc",
+			253 => "\xc3\xbd",
+			254 => "\xc3\xbe",
+			255 => "\xc3\xbf"
+		);
+
+	} elseif ($input_encoding === EATLAS_COMMONS_ENC_MACINTOSH) {
+		// Macintosh to UTF-8
+		$extended_chars_conv_table = array(
+			128 => "\xc3\x84",
+			129 => "\xc3\x85",
+
+			130 => "\xc3\x87",
+			131 => "\xc3\x89",
+			132 => "\xc3\x91",
+			133 => "\xc3\x96",
+			134 => "\xc3\x9c",
+			135 => "\xc3\xa1",
+			136 => "\xc3\xa0",
+			137 => "\xc3\xa2",
+			138 => "\xc3\xa4",
+			139 => "\xc3\xa3",
+
+			140 => "\xc3\xa5",
+			141 => "\xc3\xa7",
+			142 => "\xc3\xa9",
+			143 => "\xc3\xa8",
+			144 => "\xc3\xaa",
+			145 => "\xc3\xab",
+			146 => "\xc3\xad",
+			147 => "\xc3\xac",
+			148 => "\xc3\xae",
+			149 => "\xc3\xaf",
+
+			150 => "\xc3\xb1",
+			151 => "\xc3\xb3",
+			152 => "\xc3\xb2",
+			153 => "\xc3\xb4",
+			154 => "\xc3\xb6",
+			155 => "\xc3\xb5",
+			156 => "\xc3\xba",
+			157 => "\xc3\xb9",
+			158 => "\xc3\xbb",
+			159 => "\xc3\xbc",
+
+			160 => "\xe2\x80\xa0", // Dagger
+			161 => "\xc2\xb0",
+			162 => "\xc2\xa2",
+			163 => "\xc2\xa3",
+			164 => "\xc2\xa7",
+			165 => "\xe2\x80\xa2", // Bullet (for bullet list)
+			166 => "\xc2\xb6",
+			167 => "\xc3\x9f",
+			168 => "\xc2\xae",
+			169 => "\xc2\xa9",
+
+			170 => "\xe2\x84\xa2",
+			171 => "\xc2\xb4",
+			172 => "\xc2\xa8",
+			173 => "\xe2\x89\xa0",
+			174 => "\xc3\x86",
+			175 => "\xc3\x98",
+			176 => "\xe2\x88\x9e",
+			177 => "\xc2\xb1",
+			178 => "\xe2\x89\xa4",
+			179 => "\xe2\x89\xa5",
+
+			180 => "\xc2\xa5",
+			181 => "\xc2\xb5",
+			182 => "\xe2\x88\x82",
+			183 => "\xe2\x88\x91",
+			184 => "\xe2\x88\x8f",
+			185 => "\xcf\x80",
+			186 => "\xe2\x88\xab",
+			187 => "\xc2\xaa",
+			188 => "\xc2\xba",
+			189 => "\xce\xa9",
+
+			190 => "\xc3\xa6",
+			191 => "\xc3\xb8",
+			192 => "\xc2\xbf",
+			193 => "\xc2\xa1",
+			194 => "\xc2\xac",
+			195 => "\xe2\x88\x9a",
+			196 => "\xc6\x92", // Curved "f"
+			197 => "\xe2\x89\x88",
+			198 => "\xe2\x88\x86",
+			199 => "\xc2\xab",
+
+			200 => "\xc2\xbb",
+			201 => "\xe2\x80\xa6", // Ellipsis
+			202 => "\xc2\xa0",
+			203 => "\xc3\x80",
+			204 => "\xc3\x83",
+			205 => "\xc3\x95",
+			206 => "\xc5\x92", // OE
+			207 => "\xc5\x93",
+			208 => "\xe2\x80\x93",
+			209 => "\xe2\x80\x94",
+
+			210 => "\xe2\x80\x9c", // Left quotation mark (")
+			211 => "\xe2\x80\x9d", // Right quotation mark (")
+			212 => "\xe2\x80\x98", // Left quotation mark (')
+			213 => "\xe2\x80\x99", // Right quotation mark (')
+			214 => "\xc3\xb7",
+			215 => "\xe2\x97\x8a",
+			216 => "\xc3\xbf",
+			217 => "\xc5\xb8",
+			218 => "\xe2\x81\x84",
+			219 => "\xe2\x82\xac", // Euro
+
+			220 => "\xe2\x80\xb9", // Left quotation mark (<)
+			221 => "\xe2\x80\xba",
+			222 => "\xef\xac\x81",
+			223 => "\xef\xac\x82",
+			224 => "\xe2\x80\xa1", // Double-dagger
+			225 => "\xc2\xb7",
+			226 => "\xe2\x80\x9a", // Coma
+			227 => "\xe2\x80\x9e", // Double coma
+			228 => "\xe2\x80\xb0", // Per mille
+			229 => "\xc3\x82",
+
+			230 => "\xc3\x8a",
+			231 => "\xc3\x81",
+			232 => "\xc3\x8b",
+			233 => "\xc3\x88",
+			234 => "\xc3\x8d",
+			235 => "\xc3\x8e",
+			236 => "\xc3\x8f",
+			237 => "\xc3\x8c",
+			238 => "\xc3\x93",
+			239 => "\xc3\x94",
+
+			240 => "\xef\xa3\xbf", // The Apple logo?
+			241 => "\xc3\x92",
+			242 => "\xc3\x9a",
+			243 => "\xc3\x9b",
+			244 => "\xc3\x99",
+			245 => "\xc4\xb1",
+			246 => "\xcb\x86", // Circumflex
+			247 => "\xcb\x9c",
+			248 => "\xc2\xaf",
+			249 => "\xcb\x98",
+
+			250 => "\xcb\x99",
+			251 => "\xcb\x9a",
+			252 => "\xc2\xb8",
+			253 => "\xcb\x9d",
+			254 => "\xcb\x9b",
+			255 => "\xcb\x87"
+		);
+	}
+
+	if (!empty($extended_chars_conv_table)) {
+		$utf8_string = '';
+		$len = strlen($string);
+
+		for ($i = 0; $i < $len; $i++) {
+			$char = $string{$i};
+			$char_code = ord($char);
+
+			// NOTE: 2+ extended chars next to each other may get miss-interpreted as multi-bytes UTF-8.
+			//   It the encoding was detected as been Windows-1252 or Macintosh, it's safer
+			//   to assume all extended characters are in that encoding and nothing in
+			//   the file is UTF-8. The Drupal Unit test provide real life example of this
+			//   case for both Windows-1252 and Macintosh encoding.
+
+			// Check if it's an extend char
+			if (isset($extended_chars_conv_table[$char_code])) {
+				// Character was found in the conversion table, convert it
+				$utf8_string .= $extended_chars_conv_table[$char_code];
+
+			} else {
+				// It doesn't need conversion
+				$utf8_string .= $char;
+			}
+		}
+
+		return $utf8_string;
+	}
+
+	return $string;
+}
+
+/**
+ * @deprecated Use eatlas_commons_convert_to_utf8 instead.
+ * @param $string
+ * @param null $input_encoding
+ * @return string
+ */
+function eatlas_commons_fix_encoding($string, $input_encoding = NULL) {
+	return eatlas_commons_convert_to_utf8($string, $input_encoding);
+}
+
+
+/**
+ * Convert a UTF-8 String to ASCII.
+ * @param $string string The UTF-8 string to convert.
+ * @return string A ASCII representation of the UTF-8 string.
+ */
+function eatlas_commons_convert_utf8_to_ascii($string) {
+	$conv_table = array(
+		"\xc2\xa0" => " ", // NBSP
+		"\xc2\xa1" => "!",
+		"\xc2\xa2" => " cent ",
+		"\xc2\xa3" => " pound ",
+		"\xc2\xa4" => " scarab ", // https://en.wikipedia.org/wiki/Currency_sign_(typography)
+		"\xc2\xa5" => " yen ",
+		"\xc2\xa6" => "|",
+		"\xc2\xa7" => " section ",
+		"\xc2\xa8" => " diaeresis ",
+		"\xc2\xa9" => "(c)",
+		"\xc2\xaa" => "^a", // https://en.wikipedia.org/wiki/Ordinal_indicator
+		"\xc2\xab" => '"',
+		"\xc2\xac" => " not ", // https://en.wikipedia.org/wiki/Negation
+		"\xc2\xad" => "", // https://en.wikipedia.org/wiki/Soft_hyphen
+		"\xc2\xae" => "(R)",
+		"\xc2\xaf" => "-", // https://en.wikipedia.org/wiki/Macron_(diacritic)
+		"\xc2\xb0" => " deg ", // Degree
+		"\xc2\xb1" => "+/-",
+		"\xc2\xb2" => "^2",
+		"\xc2\xb3" => "^3",
+		"\xc2\xb4" => "'",
+		"\xc2\xb5" => " micro ",
+		"\xc2\xb6" => " pilcrow ", // https://en.wikipedia.org/wiki/Pilcrow
+		"\xc2\xb7" => "*",
+		"\xc2\xb8" => " cedilla ",
+		"\xc2\xb9" => "^1",
+		"\xc2\xba" => "^o", // https://en.wikipedia.org/wiki/Ordinal_indicator
+		"\xc2\xbb" => '"',
+		"\xc2\xbc" => " 1/4 ",
+		"\xc2\xbd" => " 1/2 ",
+		"\xc2\xbe" => " 3/4 ",
+		"\xc2\xbf" => "?",
+
+		"\xc3\x80" => "A",
+		"\xc3\x81" => "A",
+		"\xc3\x82" => "A",
+		"\xc3\x83" => "A",
+		"\xc3\x84" => "A",
+		"\xc3\x85" => "A",
+		"\xc3\x86" => "AE",
+		"\xc3\x87" => "C",
+		"\xc3\x88" => "E",
+		"\xc3\x89" => "E",
+		"\xc3\x8a" => "E",
+		"\xc3\x8b" => "E",
+		"\xc3\x8c" => "I",
+		"\xc3\x8d" => "I",
+		"\xc3\x8e" => "I",
+		"\xc3\x8f" => "I",
+		"\xc3\x90" => "D", // https://en.wikipedia.org/wiki/Eth
+		"\xc3\x91" => "N",
+		"\xc3\x92" => "O",
+		"\xc3\x93" => "O",
+		"\xc3\x94" => "O",
+		"\xc3\x95" => "O",
+		"\xc3\x96" => "O",
+		"\xc3\x97" => "*",
+		"\xc3\x98" => "O", // https://en.wikipedia.org/wiki/%C3%98
+		"\xc3\x99" => "U",
+		"\xc3\x9a" => "U",
+		"\xc3\x9b" => "U",
+		"\xc3\x9c" => "U",
+		"\xc3\x9d" => "Y",
+		"\xc3\x9e" => "th", // https://en.wikipedia.org/wiki/Thorn_(letter)
+		"\xc3\x9f" => "sz", // https://en.wikipedia.org/wiki/%C3%9F
+		"\xc3\xa0" => "a",
+		"\xc3\xa1" => "a",
+		"\xc3\xa2" => "a",
+		"\xc3\xa3" => "a",
+		"\xc3\xa4" => "a",
+		"\xc3\xa5" => "a",
+		"\xc3\xa6" => "ae",
+		"\xc3\xa7" => "c",
+		"\xc3\xa8" => "e",
+		"\xc3\xa9" => "e",
+		"\xc3\xaa" => "e",
+		"\xc3\xab" => "e",
+		"\xc3\xac" => "i",
+		"\xc3\xad" => "i",
+		"\xc3\xae" => "i",
+		"\xc3\xaf" => "i",
+		"\xc3\xb0" => "d", // https://en.wikipedia.org/wiki/Eth
+		"\xc3\xb1" => "n",
+		"\xc3\xb2" => "o",
+		"\xc3\xb3" => "o",
+		"\xc3\xb4" => "o",
+		"\xc3\xb5" => "o",
+		"\xc3\xb6" => "o",
+		"\xc3\xb7" => "/",
+		"\xc3\xb8" => "o", // https://en.wikipedia.org/wiki/%C3%98
+		"\xc3\xb9" => "u",
+		"\xc3\xba" => "u",
+		"\xc3\xbb" => "u",
+		"\xc3\xbc" => "u",
+		"\xc3\xbd" => "y",
+		"\xc3\xbe" => "TH", // https://en.wikipedia.org/wiki/Thorn_(letter)
+		"\xc3\xbf" => "y",
+
+		"\xc4\xb1" => "i", // https://en.wikipedia.org/wiki/Dotted_and_dotless_I
+
+		"\xc5\x92" => "OE", // OE
+		"\xc5\x93" => "oe",
+		"\xc5\xa0" => "S", // Upside-down circumflex S
+		"\xc5\xa1" => "s",
+		"\xc5\xb8" => "Y",
+		"\xc5\xbd" => "Z", // Upside-down circumflex Z
+		"\xc5\xbe" => "z",
+
+		"\xc6\x92" => "f", // Curved "f" https://en.wikipedia.org/wiki/%C6%91
+
+		"\xcb\x86" => " circumflex ", // Circumflex https://en.wikipedia.org/wiki/Circumflex
+		"\xcb\x87" => " caron ", // https://en.wikipedia.org/wiki/Caron
+		"\xcb\x98" => " breve ", // https://en.wikipedia.org/wiki/Breve
+		"\xcb\x99" => " dot ", // https://en.wikipedia.org/wiki/Dot_(diacritic)
+		"\xcb\x9a" => " ring ", // https://en.wikipedia.org/wiki/Ring_(diacritic)
+		"\xcb\x9b" => " ogonek ", // https://en.wikipedia.org/wiki/Ogonek
+		"\xcb\x9c" => " tilde ", // https://en.wikipedia.org/wiki/Tilde
+		"\xcb\x9d" => '"',
+
+		"\xce\xa9" => " omega ", // https://en.wikipedia.org/wiki/Omega
+
+		"\xcf\x80" => " pi ", // https://en.wikipedia.org/wiki/Pi
+
+		"\xe2\x80\x93" => "-",
+		"\xe2\x80\x94" => "--",
+		"\xe2\x80\x98" => "'", // Left quotation mark (')
+		"\xe2\x80\x99" => "'", // Right quotation mark (')
+		"\xe2\x80\x9a" => "'", // Right quotation mark (,)
+		"\xe2\x80\x9c" => '"', // Left quotation mark (")
+		"\xe2\x80\x9d" => '"', // Right quotation mark (")
+		"\xe2\x80\x9e" => '"', // Right quotation mark (,,)
+		"\xe2\x80\xa0" => " dagger ", // Dagger https://en.wikipedia.org/wiki/Dagger_(typography)
+		"\xe2\x80\xa1" => " double-dagger ", // Double-dagger https://en.wikipedia.org/wiki/Dagger_(typography)
+		"\xe2\x80\xa2" => "*", // Bullet (for bullet list)
+		"\xe2\x80\xa6" => "...", // Ellipsis
+		"\xe2\x80\xb0" => " per mille ", // Per mille https://en.wikipedia.org/wiki/Per_mille
+		"\xe2\x80\xb9" => "<", // Left quotation mark (<)
+		"\xe2\x80\xba" => ">",
+		"\xe2\x81\x84" => "/",
+		"\xe2\x82\xac" => " euro ", // Euro
+		"\xe2\x84\xa2" => " TM ",
+		"\xe2\x88\x82" => "d", // https://en.wikipedia.org/wiki/%E2%88%82
+		"\xe2\x88\x86" => " delta ", // https://en.wikipedia.org/wiki/Delta_(letter)
+		"\xe2\x88\x8f" => " Pi ", // https://en.wikipedia.org/wiki/Multiplication#Capital_Pi_notation
+		"\xe2\x88\x91" => " Sigma ", // https://en.wikipedia.org/wiki/Summation
+		"\xe2\x88\x9a" => " square root ", // https://en.wikipedia.org/wiki/Square_root
+		"\xe2\x88\x9e" => " infinity ", // https://en.wikipedia.org/wiki/Infinity_symbol
+		"\xe2\x88\xab" => " integral ", // https://en.wikipedia.org/wiki/Integral_symbol
+		"\xe2\x89\x88" => " almost equal to ", // https://en.wikipedia.org/wiki/Approximation#Unicode
+		"\xe2\x89\xa0" => "!=", // https://en.wikipedia.org/wiki/Equals_sign#Not_equal
+		"\xe2\x89\xa4" => "<=",
+		"\xe2\x89\xa5" => ">=",
+		"\xe2\x97\x8a" => "<>",
+
+		"\xef\xac\x81" => "fi",
+		"\xef\xac\x82" => "fl",
+		"\xef\xa3\xbf" => "?" // The Apple logo?
+	);
+
+	$ascii_string = '';
+	$len = strlen($string);
+	for ($i = 0; $i < $len; $i++) {
+		$char = $string{$i};
+		$utf8_char = NULL;
+
+		// Check if it's a UTF-8 char
+		if ($char >= "\xc0") {
+			$char2 = $i + 1 >= $len ? "\x00" : $string{$i+1};
+			$char3 = $i + 2 >= $len ? "\x00" : $string{$i+2};
+			$char4 = $i + 3 >= $len ? "\x00" : $string{$i+3};
+			if ($char >= "\xc0" & $char <= "\xdf") { // looks like 2 bytes UTF-8
+				if ($char2 >= "\x80" && $char2 <= "\xbf") { // yeah, almost sure it's UTF-8
+					$utf8_char = $char . $char2;
+					$i++;
+				}
+			} elseif ($char >= "\xe0" & $char <= "\xef") { // looks like 3 bytes UTF-8
+				if ($char2 >= "\x80" && $char2 <= "\xbf" &&
+						$char3 >= "\x80" && $char3 <= "\xbf") { // yeah, almost sure it's UTF-8
+					$utf8_char = $char . $char2 . $char3;
+					$i = $i + 2;
+				}
+			} elseif ($char >= "\xf0" & $char <= "\xf7") { // looks like 4 bytes UTF-8
+				if($char2 >= "\x80" && $char2 <= "\xbf" &&
+						$char3 >= "\x80" && $char3 <= "\xbf" &&
+						$char4 >= "\x80" && $char4 <= "\xbf") { // yeah, almost sure it's UTF-8
+					$utf8_char = $char . $char2 . $char3 . $char4;
+					$i = $i + 3;
+				}
+			}
+		}
+
+		if ($utf8_char) {
+			if (isset($conv_table[$utf8_char])) {
+				// Character was found in the conversion table, convert it
+				$ascii_string .= $conv_table[$utf8_char];
+			} else {
+				// It's probably a valid UTF-8 char, but we don't have a conversion for it.
+				$ascii_string .= '?';
+			}
+		} else {
+			if ($char >= "\x80") {
+				// Invalid UTF-8 char.
+				// NOTE: If it was a valid UTF-8 char, it would have been collected above.
+				//   Not all sequence of bytes is a valid UTF-8 char. See "NOTE about UTF-8" above.
+				$ascii_string .= '?';
+			} else {
+				// It's an ASCII char
+				$ascii_string .= $char;
+			}
+		}
+	}
+
+	return $ascii_string;
+}
+
+/**
+ * Convert a UTF-8 CSV file content into ASCII.
+ * This function use the PHP CSV parser functions (fgetcsv and fputcsv) to handle the document,
+ * to avoid breaking it by adding quotes or comas.
+ * @param $string string A UTF-8 string representing the whole CSV document to convert to ASCII.
+ * @return string A ASCII representation of the UTF-8 CSV document.
+ */
+function eatlas_commons_convert_csv_utf8_to_ascii($string) {
+	// Open a String file handle (maximum 50 MB)
+	$maxsize = 50 * 1024 * 1024;
+	$read_handle = fopen("php://temp/maxmemory:$maxsize", 'r+');
+	$write_handle = fopen("php://temp/maxmemory:$maxsize", 'r+');
+	fputs($read_handle, $string);
+	rewind($read_handle);
+
+	// Parse file content
+	while ($row = fgetcsv($read_handle)) {
+		$record = array();
+		foreach ($row as $i => $cell) {
+			$record[] = trim(eatlas_commons_convert_utf8_to_ascii($cell));
+		}
+		fputcsv($write_handle, $record);
+	}
+
+	rewind($write_handle);
+	$ascii_content = stream_get_contents($write_handle);
+
+	// Close the file handle
+	fclose($read_handle);
+	fclose($write_handle);
+
+	return $ascii_content;
+}
+
+?>
